@@ -4,6 +4,16 @@
   "version": "1.0.0",
   "description": "Identify and unfollow non-followers on X",
 
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "x-unfollow@prodigeris",
+      "strict_min_version": "109.0",
+      "data_collection_permissions": {
+        "required": false
+      }
+    }
+  },
+
   "permissions": [
     "webRequest",
     "storage",
