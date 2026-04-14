@@ -2,11 +2,15 @@
 
 A Firefox extension that finds accounts you follow on X (Twitter) that don't follow you back, and lets you unfollow them in bulk.
 
+![Scan results showing non-followers with unfollow and whitelist options](docs/images/scan-results.png)
+
 ## Features
 
 - Scans your entire following list and identifies non-followers
 - Review list before unfollowing — deselect anyone you want to keep
 - Whitelist accounts to permanently protect them from being unfollowed
+
+![Whitelist feature keeping favorite accounts protected](docs/images/whitelist.png)
 - Configurable unfollow speed (slow/medium/fast)
 - Per-session unfollow cap to limit how many you remove at once
 - Paginated results for large lists
