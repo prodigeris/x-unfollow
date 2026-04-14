@@ -15,26 +15,13 @@ A Firefox extension that finds accounts you follow on X (Twitter) that don't fol
 
 ## Install
 
-1. Download or clone this repo
-2. Open Firefox and go to `about:debugging#/runtime/this-firefox`
-3. Click **Load Temporary Add-on**
-4. Select `src/manifest.json`
+1. Download the latest `x-unfollow-v*.zip` from [Releases](https://github.com/prodigeris/x-unfollow/releases/latest)
+2. Unzip it
+3. Open Firefox and go to `about:debugging#/runtime/this-firefox`
+4. Click **Load Temporary Add-on**
+5. Select `manifest.json` from the unzipped folder
 
-For permanent install (persists across restarts), use [web-ext](https://extensionworkshop.com/documentation/develop/getting-started-with-web-ext/):
-
-```sh
-cd src
-web-ext run
-```
-
-Or package it:
-
-```sh
-cd src
-web-ext build
-```
-
-Then install the `.xpi` from `web-ext-artifacts/`.
+> **Note:** Temporary add-ons are removed when Firefox restarts. You'll need to re-load it each session.
 
 ## Usage
 
