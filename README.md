@@ -19,6 +19,10 @@ A Firefox extension that finds accounts you follow on X (Twitter) that don't fol
 
 ## Install
 
+Install directly from Firefox Add-ons: [X Unfollow on addons.mozilla.org](https://addons.mozilla.org/en-US/firefox/addon/x-unfollow/)
+
+### Manual install (optional)
+
 1. Download the latest `x-unfollow-v*.zip` from [Releases](https://github.com/prodigeris/x-unfollow/releases/latest)
 2. Unzip it
 3. Open Firefox and go to `about:debugging#/runtime/this-firefox`
