@@ -15,7 +15,18 @@ const state = {
     Following: null,
     Followers: null,
   },
-  features: null,
+  features: null, // last-seen features from any GraphQL request (mid-tier fallback)
+  // Following-specific request contract, most reliable first:
+  followingFeatures: null, // {name: value} captured from a real Following request
+  followingFieldToggles: null, // {name: value} captured from a real Following request
+  followingFeatureNames: null, // [names] discovered from the JS bundle (values default to true)
+  followingFieldToggleNames: null, // [names] discovered from the JS bundle (values default to false)
+  // Followers-specific request contract (same tiers as Following). Optional — the
+  // scan cross-checks against the followers list when it can, but never blocks on it.
+  followersFeatures: null,
+  followersFieldToggles: null,
+  followersFeatureNames: null,
+  followersFieldToggleNames: null,
   userId: null,
   scanStatus: "idle", // idle | scanning | unfollowing | cancelled
   lastScanUsers: [],
@@ -49,9 +60,30 @@ browser.webRequest.onBeforeRequest.addListener(
     const followMatch = url.pathname.match(/\/i\/api\/graphql\/([^/]+)\/(Following|Followers)/);
     if (followMatch) {
       state.queryIds[followMatch[2]] = followMatch[1];
+
+      // A real Following/Followers request carries the exact features +
+      // fieldToggles (names AND values) that X expects. This is the most
+      // reliable source of the request contract.
+      const featuresParam = url.searchParams.get("features");
+      const togglesParam = url.searchParams.get("fieldToggles");
+      if (followMatch[2] === "Following") {
+        if (featuresParam) {
+          try { state.followingFeatures = JSON.parse(featuresParam); } catch (e) { /* ignore */ }
+        }
+        if (togglesParam) {
+          try { state.followingFieldToggles = JSON.parse(togglesParam); } catch (e) { /* ignore */ }
+        }
+      } else if (followMatch[2] === "Followers") {
+        if (featuresParam) {
+          try { state.followersFeatures = JSON.parse(featuresParam); } catch (e) { /* ignore */ }
+        }
+        if (togglesParam) {
+          try { state.followersFieldToggles = JSON.parse(togglesParam); } catch (e) { /* ignore */ }
+        }
+      }
     }
 
-    // Capture feature flags from any GraphQL request (they're shared across operations)
+    // Capture feature flags from any GraphQL request (mid-tier fallback)
     if (!state.features && url.pathname.includes("/i/api/graphql/")) {
       const featuresParam = url.searchParams.get("features");
       if (featuresParam) {
@@ -66,13 +98,33 @@ browser.webRequest.onBeforeRequest.addListener(
   { urls: ["*://x.com/i/api/graphql/*", "*://twitter.com/i/api/graphql/*"] }
 );
 
-// Listen for queryIds discovered by the content script
+// Listen for the operation contract discovered by the content script
+// (queryId + featureSwitches + fieldToggles pulled from X's JS bundle).
 browser.runtime.onMessage.addListener((message) => {
-  if (message.type === "discovered-queryIds") {
-    for (const [opName, queryId] of Object.entries(message.queryIds)) {
-      if (queryId && !state.queryIds[opName]) {
-        state.queryIds[opName] = queryId;
-        console.log(`X Unfollow: discovered ${opName} queryId from content script:`, queryId);
+  if (message.type === "discovered-operations") {
+    for (const [opName, op] of Object.entries(message.operations || {})) {
+      if (!op) continue;
+
+      if (op.queryId && !state.queryIds[opName]) {
+        state.queryIds[opName] = op.queryId;
+        console.log(`X Unfollow: discovered ${opName} queryId from content script:`, op.queryId);
+      }
+
+      if (opName === "Following") {
+        if (Array.isArray(op.features) && op.features.length && !state.followingFeatureNames) {
+          state.followingFeatureNames = op.features;
+          console.log(`X Unfollow: discovered ${op.features.length} Following feature switches from bundle`);
+        }
+        if (Array.isArray(op.fieldToggles) && op.fieldToggles.length && !state.followingFieldToggleNames) {
+          state.followingFieldToggleNames = op.fieldToggles;
+        }
+      } else if (opName === "Followers") {
+        if (Array.isArray(op.features) && op.features.length && !state.followersFeatureNames) {
+          state.followersFeatureNames = op.features;
+        }
+        if (Array.isArray(op.fieldToggles) && op.fieldToggles.length && !state.followersFieldToggleNames) {
+          state.followersFieldToggleNames = op.fieldToggles;
+        }
       }
     }
   }
@@ -168,18 +220,25 @@ async function autoBootstrap() {
         for (const opName of ["Following", "Followers"]) {
           if (state.queryIds[opName]) continue;
 
-          const patterns = [
-            new RegExp(`queryId:"([^"]+)",operationName:"${opName}"`),
-            new RegExp(`queryId:"([^"]+)"[^}]*operationName:"${opName}"`),
-            new RegExp(`"${opName}"[^}]*queryId:"([^"]+)"`),
-          ];
+          const op = extractOperationContract(js, opName);
+          if (op && op.queryId) {
+            state.queryIds[opName] = op.queryId;
+            console.log(`X Unfollow: discovered ${opName} queryId from fetch:`, op.queryId);
 
-          for (const pattern of patterns) {
-            const match = js.match(pattern);
-            if (match) {
-              state.queryIds[opName] = match[1];
-              console.log(`X Unfollow: discovered ${opName} queryId from fetch:`, match[1]);
-              break;
+            if (opName === "Following") {
+              if (op.features.length && !state.followingFeatureNames) {
+                state.followingFeatureNames = op.features;
+              }
+              if (op.fieldToggles.length && !state.followingFieldToggleNames) {
+                state.followingFieldToggleNames = op.fieldToggles;
+              }
+            } else if (opName === "Followers") {
+              if (op.features.length && !state.followersFeatureNames) {
+                state.followersFeatureNames = op.features;
+              }
+              if (op.fieldToggles.length && !state.followersFieldToggleNames) {
+                state.followersFieldToggleNames = op.fieldToggles;
+              }
             }
           }
         }
@@ -196,34 +255,162 @@ async function autoBootstrap() {
   return !!(state.queryIds.Following && state.features);
 }
 
+// Last-resort backstop: the feature switches X's `Following` operation required
+// as of 2026-08 (captured from the live client bundle). X rejects a request with
+// HTTP 400 ("The following features cannot be null: ...") when a required switch
+// is absent — it validates presence, not value — so we send every one.
+// Prefer the live-captured / bundle-discovered contract over this static list.
+const DEFAULT_FOLLOWING_FEATURES = [
+  "rweb_video_screen_enabled",
+  "rweb_cashtags_enabled",
+  "profile_label_improvements_pcf_label_in_post_enabled",
+  "responsive_web_profile_redirect_enabled",
+  "rweb_tipjar_consumption_enabled",
+  "verified_phone_label_enabled",
+  "creator_subscriptions_tweet_preview_api_enabled",
+  "responsive_web_graphql_timeline_navigation_enabled",
+  "premium_content_api_read_enabled",
+  "communities_web_enable_tweet_community_results_fetch",
+  "c9s_tweet_anatomy_moderator_badge_enabled",
+  "responsive_web_grok_analyze_button_fetch_trends_enabled",
+  "responsive_web_grok_analyze_post_followups_enabled",
+  "rweb_cashtags_composer_attachment_enabled",
+  "responsive_web_jetfuel_frame",
+  "responsive_web_grok_share_attachment_enabled",
+  "responsive_web_grok_annotations_enabled",
+  "articles_preview_enabled",
+  "responsive_web_edit_tweet_api_enabled",
+  "rweb_conversational_replies_downvote_enabled",
+  "graphql_is_translatable_rweb_tweet_is_translatable_enabled",
+  "view_counts_everywhere_api_enabled",
+  "longform_notetweets_consumption_enabled",
+  "responsive_web_twitter_article_tweet_consumption_enabled",
+  "content_disclosure_indicator_enabled",
+  "content_disclosure_ai_generated_indicator_enabled",
+  "responsive_web_grok_show_grok_translated_post",
+  "responsive_web_grok_analysis_button_from_backend",
+  "post_ctas_fetch_enabled",
+  "freedom_of_speech_not_reach_fetch_enabled",
+  "standardized_nudges_misinfo",
+  "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled",
+  "longform_notetweets_rich_text_read_enabled",
+  "longform_notetweets_inline_media_enabled",
+  "responsive_web_grok_image_annotation_enabled",
+  "responsive_web_grok_imagine_annotation_enabled",
+  "responsive_web_grok_community_note_auto_translation_is_enabled",
+  "responsive_web_enhance_cards_enabled",
+];
+
+// fieldToggles X's `Following` operation required as of 2026-08. Same presence
+// rule as features; none of these gate the relationship_perspectives.followed_by
+// field we read, so their values are safe to leave off.
+const DEFAULT_FOLLOWING_FIELD_TOGGLES = [
+  "withPayments",
+  "withAuxiliaryUserLabels",
+  "withArticleRichContentState",
+  "withArticlePlainText",
+  "withArticleSummaryText",
+  "withArticleVoiceOver",
+  "withGrokAnalyze",
+  "withDisallowedReplyControls",
+];
+
+function namesToObject(names, value) {
+  const obj = {};
+  for (const name of names) obj[name] = value;
+  return obj;
+}
+
 function getDefaultFeatures() {
-  // These feature flags are commonly required by X's GraphQL API.
-  // They may need updating if X changes requirements.
-  return {
-    rweb_tipjar_consumption_enabled: true,
-    responsive_web_graphql_exclude_directive_enabled: true,
-    verified_phone_label_enabled: false,
-    creator_subscriptions_tweet_preview_api_enabled: true,
-    responsive_web_graphql_timeline_navigation_enabled: true,
-    responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
-    communities_web_enable_tweet_community_results_fetch: true,
-    c9s_tweet_anatomy_moderator_badge_enabled: true,
-    articles_preview_enabled: true,
-    responsive_web_edit_tweet_api_enabled: true,
-    graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
-    view_counts_everywhere_api_enabled: true,
-    longform_notetweets_consumption_enabled: true,
-    responsive_web_twitter_article_tweet_consumption_enabled: true,
-    tweet_awards_web_tipping_enabled: false,
-    creator_subscriptions_quote_tweet_preview_enabled: false,
-    freedom_of_speech_not_reach_fetch_enabled: true,
-    standardized_nudges_misinfo: true,
-    tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
-    rweb_video_timestamps_enabled: true,
-    longform_notetweets_rich_text_read_enabled: true,
-    longform_notetweets_inline_media_enabled: true,
-    responsive_web_enhance_cards_enabled: false,
-  };
+  return namesToObject(DEFAULT_FOLLOWING_FEATURES, true);
+}
+
+function getDefaultFieldToggles() {
+  return namesToObject(DEFAULT_FOLLOWING_FIELD_TOGGLES, false);
+}
+
+// Resolve the features to send with a Following request, most reliable first:
+//   1. exact features (names + values) from a real Following request we observed
+//   2. feature names read from X's JS bundle (values default to true)
+//   3. features seen on any other GraphQL request
+//   4. static backstop captured from a recent X client
+function resolveFollowingFeatures() {
+  if (state.followingFeatures) return state.followingFeatures;
+  if (state.followingFeatureNames && state.followingFeatureNames.length) {
+    return namesToObject(state.followingFeatureNames, true);
+  }
+  if (state.features) return state.features;
+  return getDefaultFeatures();
+}
+
+// Resolve the fieldToggles to send with a Following request, most reliable first.
+function resolveFollowingFieldToggles() {
+  if (state.followingFieldToggles) return state.followingFieldToggles;
+  if (state.followingFieldToggleNames && state.followingFieldToggleNames.length) {
+    return namesToObject(state.followingFieldToggleNames, false);
+  }
+  return getDefaultFieldToggles();
+}
+
+// Followers uses the same feature/fieldToggle requirements as Following, so we
+// fall back to the resolved Following contract when we haven't observed a real
+// Followers request or bundle entry.
+function resolveFollowersFeatures() {
+  if (state.followersFeatures) return state.followersFeatures;
+  if (state.followersFeatureNames && state.followersFeatureNames.length) {
+    return namesToObject(state.followersFeatureNames, true);
+  }
+  return resolveFollowingFeatures();
+}
+
+function resolveFollowersFieldToggles() {
+  if (state.followersFieldToggles) return state.followersFieldToggles;
+  if (state.followersFieldToggleNames && state.followersFieldToggleNames.length) {
+    return namesToObject(state.followersFieldToggleNames, false);
+  }
+  return resolveFollowingFieldToggles();
+}
+
+// Extract { queryId, features, fieldToggles } for a GraphQL operation from a
+// bundle. Mirrors the extractor in content.js (background page has no DOM access
+// to share it). X registers each operation as:
+//   {queryId:"...",operationName:"Following",operationType:"query",metadata:{featureSwitches:[...],fieldToggles:[...]}}
+function extractOperationContract(js, opName) {
+  const marker = `operationName:"${opName}"`;
+  let from = 0;
+
+  while (true) {
+    const idx = js.indexOf(marker, from);
+    if (idx === -1) return null;
+    from = idx + marker.length;
+
+    const before = js.slice(Math.max(0, idx - 80), idx);
+    const qm = before.match(/queryId:"([^"]+)",\s*$/);
+    let queryId = qm ? qm[1] : null;
+
+    const after = js.slice(idx, idx + 3000);
+    if (!queryId) {
+      const am = after.slice(0, 200).match(/queryId:"([^"]+)"/);
+      if (am) queryId = am[1];
+    }
+
+    if (queryId) {
+      return {
+        queryId,
+        features: extractStringArray(after, "featureSwitches") || [],
+        fieldToggles: extractStringArray(after, "fieldToggles") || [],
+      };
+    }
+  }
+}
+
+function extractStringArray(segment, key) {
+  const i = segment.indexOf(key + ":[");
+  if (i === -1) return null;
+  const start = i + key.length + 2;
+  const end = segment.indexOf("]", start);
+  if (end === -1) return null;
+  return [...segment.slice(start, end).matchAll(/"([a-zA-Z0-9_]+)"/g)].map((m) => m[1]);
 }
 
 // --- Readiness Check ---
@@ -286,7 +473,15 @@ browser.runtime.onConnect.addListener((port) => {
             const result = await runScan({
               queryId: state.queryIds.Following,
               userId: state.userId,
-              features: state.features,
+              features: resolveFollowingFeatures(),
+              fieldToggles: resolveFollowingFieldToggles(),
+              followers: state.queryIds.Followers
+                ? {
+                    queryId: state.queryIds.Followers,
+                    features: resolveFollowersFeatures(),
+                    fieldToggles: resolveFollowersFieldToggles(),
+                  }
+                : null,
               tokens: { ...state.tokens },
               onProgress: (progress) => {
                 if (state.dashboardPort) {

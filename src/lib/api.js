@@ -48,9 +48,11 @@ async function graphqlGetWithToggles(queryId, operationName, variables, features
 
 /**
  * Fetch a page of the Following list.
+ * `fieldToggles` must match what X's Following operation currently expects —
+ * X rejects the request if required toggles are missing.
  * Returns { users: [...], nextCursor: string|null, totalCount: number|null }
  */
-async function fetchFollowingPage(queryId, userId, features, tokens, cursor = null) {
+async function fetchFollowingPage(queryId, userId, features, fieldToggles, tokens, cursor = null) {
   const variables = {
     userId,
     count: 100,
@@ -59,11 +61,6 @@ async function fetchFollowingPage(queryId, userId, features, tokens, cursor = nu
   if (cursor) {
     variables.cursor = cursor;
   }
-
-  // fieldToggles enables relationship fields like followed_by
-  const fieldToggles = {
-    withAudienceExpansion: true,
-  };
 
   const { status, data } = await graphqlGetWithToggles(queryId, "Following", variables, features, fieldToggles, tokens);
 
@@ -74,7 +71,7 @@ async function fetchFollowingPage(queryId, userId, features, tokens, cursor = nu
     throw { type: "auth_error", status };
   }
   if (status !== 200) {
-    throw { type: "api_error", status, data };
+    throw { type: "api_error", status, message: apiErrorMessage(data, status), data };
   }
 
   // Check for API-level errors
@@ -83,16 +80,32 @@ async function fetchFollowingPage(queryId, userId, features, tokens, cursor = nu
     if (rateError) {
       throw { type: "rate_limit", status: 200, data };
     }
-    throw { type: "api_error", status: 200, data };
+    throw { type: "api_error", status: 200, message: apiErrorMessage(data, 200), data };
   }
 
   return parseFollowingResponse(data);
 }
 
 /**
- * Fetch a page of the Followers list (same structure as Following).
+ * Build a readable message from an X API error payload so failures like
+ * "The following features cannot be null: ..." reach the user instead of a
+ * generic error.
  */
-async function fetchFollowersPage(queryId, userId, features, tokens, cursor = null) {
+function apiErrorMessage(data, status) {
+  if (data && Array.isArray(data.errors) && data.errors.length > 0) {
+    const messages = data.errors.map((e) => e && e.message).filter(Boolean);
+    if (messages.length > 0) {
+      return `X API error (${status}): ${messages.join("; ")}`;
+    }
+  }
+  return `X API returned status ${status}`;
+}
+
+/**
+ * Fetch a page of the Followers list (same request contract and response shape
+ * as Following — see fetchFollowingPage for why fieldToggles matter).
+ */
+async function fetchFollowersPage(queryId, userId, features, fieldToggles, tokens, cursor = null) {
   const variables = {
     userId,
     count: 100,
@@ -102,7 +115,7 @@ async function fetchFollowersPage(queryId, userId, features, tokens, cursor = nu
     variables.cursor = cursor;
   }
 
-  const { status, data } = await graphqlGet(queryId, "Followers", variables, features, tokens);
+  const { status, data } = await graphqlGetWithToggles(queryId, "Followers", variables, features, fieldToggles, tokens);
 
   if (status === 429) {
     throw { type: "rate_limit", status };
@@ -111,7 +124,7 @@ async function fetchFollowersPage(queryId, userId, features, tokens, cursor = nu
     throw { type: "auth_error", status };
   }
   if (status !== 200) {
-    throw { type: "api_error", status, data };
+    throw { type: "api_error", status, message: apiErrorMessage(data, status), data };
   }
 
   if (data.errors && data.errors.length > 0) {
@@ -119,7 +132,7 @@ async function fetchFollowersPage(queryId, userId, features, tokens, cursor = nu
     if (rateError) {
       throw { type: "rate_limit", status: 200, data };
     }
-    throw { type: "api_error", status: 200, data };
+    throw { type: "api_error", status: 200, message: apiErrorMessage(data, 200), data };
   }
 
   return parseFollowingResponse(data); // Same response format
@@ -161,15 +174,14 @@ function parseFollowingResponse(data) {
 
       // User entries
       const userResult = entry.content?.itemContent?.user_results?.result;
-      if (!userResult) continue;
+      if (!userResult || !userResult.rest_id) continue;
 
-      const legacy = userResult.legacy;
-      if (!legacy) continue;
-
-      // X API structure (2025+):
-      //   core.name, core.screen_name
-      //   avatar.image_url
-      //   relationship_perspectives.followed_by
+      // X migrated the User object off the old `legacy` blob: identity now lives
+      // in `core`, the avatar in `avatar`, and follow state in
+      // `relationship_perspectives`. `legacy` is kept only as a fallback in case
+      // an older response shape is ever returned — requiring it here would
+      // silently drop every user.
+      const legacy = userResult.legacy || {};
       const core = userResult.core || {};
       const relPersp = userResult.relationship_perspectives || {};
 
