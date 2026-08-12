@@ -123,7 +123,27 @@ async function init() {
   unfollowSpeed = stored.unfollowSpeed || "slow";
 
   connectPort();
+  renderVersionBadge();
   sendMessage("get-readiness");
+}
+
+// Extension version — lets you confirm which build is actually loaded.
+function appVersion() {
+  try {
+    return browser.runtime.getManifest().version;
+  } catch (e) {
+    return "?";
+  }
+}
+
+function renderVersionBadge() {
+  const footer = document.getElementById("app-footer");
+  if (footer && !footer.querySelector(".version-badge")) {
+    const badge = document.createElement("span");
+    badge.className = "version-badge";
+    badge.textContent = ` · v${appVersion()}`;
+    footer.appendChild(badge);
+  }
 }
 
 // --- Readiness ---
@@ -199,9 +219,17 @@ function handleScanProgress(data) {
   const barEl = document.getElementById("scan-progress-bar");
   const textEl = document.getElementById("scan-progress-text");
 
-  if (statusEl) statusEl.textContent = `Scanning page ${data.page}...`;
-  if (textEl) textEl.textContent = `${data.collected} accounts scanned \u00b7 ${data.nonFollowers} non-followers found`;
-  if (barEl) barEl.style.width = `${Math.min(90, data.page * 5)}%`;
+  const onFollowers = data.phase === "followers";
+  if (statusEl) statusEl.textContent = `Scanning ${onFollowers ? "followers" : "following"} list \u2014 page ${data.page}...`;
+  if (textEl) {
+    textEl.textContent = `${data.followingCollected || 0} following \u00b7 ${data.followersCollected || 0} followers retrieved`;
+  }
+  if (barEl) {
+    // Following fills the first half of the bar, followers the second half.
+    const base = onFollowers ? 50 : 0;
+    const cap = onFollowers ? 95 : 45;
+    barEl.style.width = `${Math.min(cap, base + data.page * 5)}%`;
+  }
 }
 
 function cancelScan() {
@@ -211,16 +239,25 @@ function cancelScan() {
 function handleScanComplete(data) {
   scanData = data;
 
-  if (data.error && (!data.nonFollowers || data.nonFollowers.length === 0)) {
-    showError(data.error);
+  const total = data.total || 0;
+
+  // Zero accounts retrieved is almost never real — surface it as a diagnostic
+  // instead of a misleading "everyone follows you back".
+  if (total === 0) {
+    showZeroDiagnostic(data);
     return;
   }
 
-  if ((!data.nonFollowers || data.nonFollowers.length === 0) && (!data.unknowns || data.unknowns.length === 0)) {
+  const noNonFollowers = !data.nonFollowers || data.nonFollowers.length === 0;
+  const noUnknowns = !data.unknowns || data.unknowns.length === 0;
+
+  // Only celebrate on a clean, complete scan with genuinely nobody to unfollow.
+  if (noNonFollowers && noUnknowns && !data.error && !data.partial) {
     mainContent.innerHTML = `
       <div class="status-card">
         <h2>Everyone follows you back!</h2>
-        <p>No non-followers found among your ${data.total} following.</p>
+        ${scanSummaryHtml(data)}
+        <p style="margin-top: 8px;">No non-followers among the ${total} following we scanned.</p>
         <button class="btn btn-secondary" data-action="show-idle" style="margin-top: 12px;">
           Scan Again
         </button>
@@ -230,6 +267,40 @@ function handleScanComplete(data) {
   }
 
   showReviewState(data);
+}
+
+// Compact "what we retrieved" line, shown wherever a scan finishes.
+function scanSummaryHtml(data) {
+  const followers = formatFollowersCount(data);
+  return `
+    <div class="scan-summary">
+      <span><strong>${data.total || 0}</strong> following retrieved</span>
+      <span><strong>${followers}</strong> followers retrieved</span>
+      <span><strong>${data.followBack || 0}</strong> follow you back</span>
+    </div>
+  `;
+}
+
+function formatFollowersCount(data) {
+  if (data.followersCount === null || data.followersCount === undefined) return "—";
+  // A "+" flags a followers list we couldn't finish paginating.
+  return data.followersCount + (data.followersComplete ? "" : "+");
+}
+
+function showZeroDiagnostic(data) {
+  mainContent.innerHTML = `
+    <div class="status-card">
+      <h2>Scan retrieved 0 accounts</h2>
+      <p>The scan reached X but pulled back nothing. That almost always means one of these — in order of likelihood:</p>
+      <ul class="diagnostic-list">
+        <li>You're not fully logged in on <a href="https://x.com" target="_blank">x.com</a>. Open it, confirm you're logged in, then rescan.</li>
+        <li>An older build of the extension is loaded. Confirm the version shown below is <strong>${escapeHtml(appVersion())}</strong>; if not, reload the add-on.</li>
+        <li>X changed its private API again. If the two above check out, this one's worth reporting.</li>
+      </ul>
+      ${data.error ? `<div class="error-banner">Details: ${escapeHtml(data.error)}</div>` : ""}
+      <button class="btn btn-primary" data-action="show-idle" style="margin-top: 12px;">Try Again</button>
+    </div>
+  `;
 }
 
 // --- Review ---
@@ -255,6 +326,14 @@ function renderReviewUI(data) {
       <div class="stat">
         <div class="stat-value">${data.total}</div>
         <div class="stat-label">Following</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">${formatFollowersCount(data)}</div>
+        <div class="stat-label">Followers</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">${data.followBack || 0}</div>
+        <div class="stat-label">Follow back</div>
       </div>
       <div class="stat">
         <div class="stat-value">${data.nonFollowers.length}</div>
