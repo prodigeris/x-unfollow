@@ -318,7 +318,7 @@ function showReviewState(data) {
 
 function renderReviewUI(data) {
   const warningHtml = data.partial
-    ? `<div class="warning-banner">Scan was incomplete: ${data.error || "Some data may be missing."}</div>`
+    ? `<div class="warning-banner">Scan was incomplete: ${escapeHtml(data.error || "Some data may be missing.")}</div>`
     : "";
 
   const statsHtml = `
@@ -419,10 +419,10 @@ function userCardHtml(user, isUnknown = false) {
   const fallbackSvg = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><rect fill="#38444d" width="48" height="48" rx="24"/></svg>');
 
   return `
-    <div class="user-card ${wlClass}" data-user-id="${user.id}">
+    <div class="user-card ${wlClass}" data-user-id="${escapeAttr(user.id)}">
       <input type="checkbox" ${checked} ${isUnknown ? "disabled" : ""}
-        data-user-id="${user.id}" />
-      <img class="user-avatar" src="${avatarUrl || fallbackSvg}" data-fallback="${fallbackSvg}" />
+        data-user-id="${escapeAttr(user.id)}" />
+      <img class="user-avatar" src="${escapeAttr(avatarUrl || fallbackSvg)}" data-fallback="${escapeAttr(fallbackSvg)}" />
       <div class="user-info">
         <div class="user-name">${escapeHtml(user.name)} ${wlBadge}</div>
         <div class="user-handle">@${escapeHtml(user.screenName)}</div>
@@ -430,8 +430,8 @@ function userCardHtml(user, isUnknown = false) {
       <div class="user-actions">
         <button class="btn btn-secondary btn-small"
           data-action="toggle-whitelist"
-          data-user-id="${user.id}"
-          data-screen-name="${escapeHtml(user.screenName)}">
+          data-user-id="${escapeAttr(user.id)}"
+          data-screen-name="${escapeAttr(user.screenName)}">
           ${wlBtnText}
         </button>
       </div>
@@ -660,11 +660,23 @@ function showError(message) {
 
 // --- Utilities ---
 
+// Escape for HTML *text* content (escapes & < >, not quotes).
 function escapeHtml(str) {
   if (!str) return "";
   const div = document.createElement("div");
   div.textContent = str;
   return div.innerHTML;
+}
+
+// Escape for a double-quoted HTML *attribute* value. textContent-based escaping
+// leaves quotes intact, which is unsafe inside `attr="..."`, so escape them too.
+function escapeAttr(str) {
+  return String(str == null ? "" : str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 // --- Avatar fallback (CSP-safe, no inline onerror) ---

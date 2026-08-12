@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "X Unfollow",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Identify and unfollow non-followers on X",
 
   "browser_specific_settings": {
