@@ -202,25 +202,82 @@ async function autoBootstrap() {
     state.features = getDefaultFeatures();
   }
 
-  // Discover any operation contract we're still missing. Following is required;
-  // Followers is best-effort (it powers the follower count and unknown resolution).
-  if (state.queryIds.Following && state.queryIds.Followers) {
+  // We need Following (for the scan) and UserByRestId (for the follower total).
+  if (state.queryIds.Following && state.queryIds.UserByRestId) {
     return true;
   }
 
-  if (!state.queryIds.Following) {
-    // Following is required — keep trying to discover it on each readiness check.
-    await discoverOperationsFromBundles();
-  } else if (!state.queryIds.Followers && !state.followersBundleFetchTried) {
-    // Following is set but Followers isn't (e.g. its code-split chunk wasn't
-    // loaded on the page content.js saw). The bundle fetch is heavy, so run it
-    // just once and don't block readiness on it — content.js and webRequest also
-    // fill Followers in passively once the user touches a followers page.
-    state.followersBundleFetchTried = true;
-    state.followersDiscovery = discoverOperationsFromBundles();
-  }
+  // Read the ids straight out of X's client bundle via an open x.com tab. This
+  // is the reliable channel: content.js can't fetch abs.twimg.com in Firefox
+  // (cross-origin content-script restriction) and X's home HTML no longer lists
+  // its bundle URLs, so neither older path worked.
+  await discoverFromOpenTabs();
 
   return !!(state.queryIds.Following && state.features);
+}
+
+// Read X's client bundle from an open x.com tab and extract the operation ids we
+// need. Uses tabs.executeScript to read the <script> URLs from the page (a plain
+// DOM read that always works), then fetches the bundle from the background —
+// which, with twimg.com in host_permissions, is allowed cross-origin. Works even
+// for tabs opened before the add-on loaded, unlike content.js.
+async function discoverFromOpenTabs() {
+  const stillNeeded = () =>
+    !state.queryIds.Following || !state.queryIds.Followers || !state.queryIds.UserByRestId;
+  if (!stillNeeded()) return;
+
+  let bundleUrls = [];
+  try {
+    const tabs = await browser.tabs.query({ url: ["*://*.x.com/*", "*://*.twitter.com/*"] });
+    for (const tab of tabs) {
+      try {
+        const res = await browser.tabs.executeScript(tab.id, {
+          code: `[...document.querySelectorAll('script[src*="abs.twimg.com/responsive-web/client-web"]')].map(function (s) { return s.src; })`,
+        });
+        if (res && res[0] && res[0].length) {
+          bundleUrls = res[0];
+          break;
+        }
+      } catch (e) {
+        // Tab not scriptable (still loading, restricted page, etc.) — try the next.
+      }
+    }
+  } catch (e) {
+    console.warn("X Unfollow: tab query failed", e && e.message);
+  }
+
+  for (const url of bundleUrls) {
+    if (!stillNeeded()) break;
+    try {
+      const js = await (await fetch(url)).text();
+      captureOperationsFromBundle(js);
+    } catch (e) {
+      console.warn("X Unfollow: bundle fetch failed", e && e.message);
+    }
+  }
+}
+
+// Extract the operations we use from a bundle's source and store each contract.
+function captureOperationsFromBundle(js) {
+  for (const opName of ["Following", "Followers", "UserByRestId"]) {
+    if (state.queryIds[opName]) continue;
+    const op = extractOperationContract(js, opName);
+    if (op && op.queryId) {
+      state.queryIds[opName] = op.queryId;
+      console.log(`X Unfollow: discovered ${opName} queryId from bundle:`, op.queryId);
+
+      if (opName === "Following") {
+        if (op.features.length && !state.followingFeatureNames) state.followingFeatureNames = op.features;
+        if (op.fieldToggles.length && !state.followingFieldToggleNames) state.followingFieldToggleNames = op.fieldToggles;
+      } else if (opName === "Followers") {
+        if (op.features.length && !state.followersFeatureNames) state.followersFeatureNames = op.features;
+        if (op.fieldToggles.length && !state.followersFieldToggleNames) state.followersFieldToggleNames = op.fieldToggles;
+      } else if (opName === "UserByRestId") {
+        if (op.features.length && !state.userByRestIdFeatureNames) state.userByRestIdFeatureNames = op.features;
+        if (op.fieldToggles.length && !state.userByRestIdFieldToggleNames) state.userByRestIdFieldToggleNames = op.fieldToggles;
+      }
+    }
+  }
 }
 
 // Fetch X's home HTML, find its JS bundle URLs, and extract the Following /
@@ -544,6 +601,13 @@ browser.runtime.onConnect.addListener((port) => {
           state.scanStatus = "scanning";
 
           try {
+            // Make sure we have the UserByRestId id for the follower total; the
+            // dashboard's readiness check usually discovers it first, but a fast
+            // scan may beat it. Discovery is idempotent and cheap once cached.
+            if (!state.queryIds.UserByRestId) {
+              await discoverFromOpenTabs();
+            }
+
             // Fetch the follower/following totals in parallel with the scan —
             // it's a single cheap call and must never block or fail the scan.
             const countsPromise = fetchFollowerCounts();
