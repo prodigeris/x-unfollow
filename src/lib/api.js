@@ -139,6 +139,41 @@ async function fetchFollowersPage(queryId, userId, features, fieldToggles, token
 }
 
 /**
+ * Fetch the profile's follower/following totals in a single UserByRestId call.
+ * Reads `relationship_counts` (X's modern home for these counts — the numbers
+ * shown on the profile). Cheap: one request, no pagination.
+ * Returns { followers: number|null, following: number|null }.
+ */
+async function fetchFollowerTotal(queryId, userId, features, fieldToggles, tokens) {
+  const variables = { userId };
+
+  const { status, data } = await graphqlGetWithToggles(queryId, "UserByRestId", variables, features, fieldToggles, tokens);
+
+  if (status === 429) {
+    throw { type: "rate_limit", status };
+  }
+  if (status === 403) {
+    throw { type: "auth_error", status };
+  }
+  if (status !== 200) {
+    throw { type: "api_error", status, message: apiErrorMessage(data, status), data };
+  }
+  if (data.errors && data.errors.length > 0) {
+    const rateError = data.errors.find((e) => e.code === 88);
+    if (rateError) {
+      throw { type: "rate_limit", status: 200, data };
+    }
+    throw { type: "api_error", status: 200, message: apiErrorMessage(data, 200), data };
+  }
+
+  const counts = data?.data?.user?.result?.relationship_counts || {};
+  return {
+    followers: typeof counts.followers === "number" ? counts.followers : null,
+    following: typeof counts.following === "number" ? counts.following : null,
+  };
+}
+
+/**
  * Parse the Following/Followers GraphQL response, handling known path variants.
  */
 function parseFollowingResponse(data) {

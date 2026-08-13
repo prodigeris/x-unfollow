@@ -2,32 +2,47 @@
 // Runs on x.com pages to discover the GraphQL operation contract
 // (queryId + featureSwitches + fieldToggles) from the loaded JS bundles.
 // X validates these per-operation, so we mirror exactly what its own client sends.
+//
+// X's operation registry lives in its main client bundle, but that <script> tag
+// is injected after initial load — so we poll for it rather than reading the DOM
+// once. All the operations we need are in the same bundle.
 
 (async function () {
-  const scripts = document.querySelectorAll('script[src*="abs.twimg.com/responsive-web/client-web"]');
-  if (scripts.length === 0) return;
-
+  const WANTED = ["Following", "Followers", "UserByRestId"];
   const operations = {}; // opName -> { queryId, features: [names], fieldToggles: [names] }
 
-  for (const script of scripts) {
-    if (operations.Following && operations.Followers) break;
-
-    try {
-      const resp = await fetch(script.src);
-      const js = await resp.text();
-
-      for (const opName of ["Following", "Followers"]) {
-        if (operations[opName]) continue;
-        const op = extractOperation(js, opName);
-        if (op) operations[opName] = op;
+  async function scanLoadedBundles() {
+    const scripts = document.querySelectorAll('script[src*="abs.twimg.com/responsive-web/client-web"]');
+    for (const script of scripts) {
+      if (WANTED.every((o) => operations[o])) break;
+      try {
+        const resp = await fetch(script.src);
+        const js = await resp.text();
+        for (const opName of WANTED) {
+          if (operations[opName]) continue;
+          const op = extractOperation(js, opName);
+          if (op) operations[opName] = op;
+        }
+      } catch (e) {
+        // Skip failed fetches
       }
-    } catch (e) {
-      // Skip failed fetches
     }
   }
 
-  if (Object.keys(operations).length > 0) {
-    browser.runtime.sendMessage({ type: "discovered-operations", operations });
+  // Poll: the bundle may not be in the DOM yet at document_idle, and X injects
+  // it shortly after. Report progressively so the background gets ids ASAP.
+  let lastReported = 0;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await scanLoadedBundles();
+
+    const found = Object.keys(operations).length;
+    if (found > lastReported) {
+      browser.runtime.sendMessage({ type: "discovered-operations", operations });
+      lastReported = found;
+    }
+
+    if (WANTED.every((o) => operations[o])) break;
+    await new Promise((r) => setTimeout(r, 1500));
   }
 })();
 

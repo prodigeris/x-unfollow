@@ -14,6 +14,7 @@ const state = {
   queryIds: {
     Following: null,
     Followers: null,
+    UserByRestId: null, // for the follower/following totals (relationship_counts)
   },
   features: null, // last-seen features from any GraphQL request (mid-tier fallback)
   // Following-specific request contract, most reliable first:
@@ -29,6 +30,11 @@ const state = {
   followersFieldToggleNames: null,
   followersBundleFetchTried: false, // one-shot guard for the heavy Followers bundle lookup
   followersDiscovery: null, // in-flight Followers discovery promise, so a scan can await it
+  // UserByRestId request contract (for the follower total via relationship_counts).
+  userByRestIdFeatures: null,
+  userByRestIdFieldToggles: null,
+  userByRestIdFeatureNames: null,
+  userByRestIdFieldToggleNames: null,
   userId: null,
   scanStatus: "idle", // idle | scanning | unfollowing | cancelled
   lastScanUsers: [],
@@ -58,29 +64,35 @@ browser.webRequest.onBeforeRequest.addListener(
   (details) => {
     const url = new URL(details.url);
 
-    // Capture Following/Followers queryId specifically
-    const followMatch = url.pathname.match(/\/i\/api\/graphql\/([^/]+)\/(Following|Followers)/);
-    if (followMatch) {
-      state.queryIds[followMatch[2]] = followMatch[1];
+    // Capture the queryId + exact request contract for the operations we use.
+    // A real request carries the precise features + fieldToggles (names AND
+    // values) X expects, so it's the most reliable source.
+    const opMatch = url.pathname.match(/\/i\/api\/graphql\/([^/]+)\/(Following|Followers|UserByRestId)/);
+    if (opMatch) {
+      state.queryIds[opMatch[2]] = opMatch[1];
 
-      // A real Following/Followers request carries the exact features +
-      // fieldToggles (names AND values) that X expects. This is the most
-      // reliable source of the request contract.
       const featuresParam = url.searchParams.get("features");
       const togglesParam = url.searchParams.get("fieldToggles");
-      if (followMatch[2] === "Following") {
+      if (opMatch[2] === "Following") {
         if (featuresParam) {
           try { state.followingFeatures = JSON.parse(featuresParam); } catch (e) { /* ignore */ }
         }
         if (togglesParam) {
           try { state.followingFieldToggles = JSON.parse(togglesParam); } catch (e) { /* ignore */ }
         }
-      } else if (followMatch[2] === "Followers") {
+      } else if (opMatch[2] === "Followers") {
         if (featuresParam) {
           try { state.followersFeatures = JSON.parse(featuresParam); } catch (e) { /* ignore */ }
         }
         if (togglesParam) {
           try { state.followersFieldToggles = JSON.parse(togglesParam); } catch (e) { /* ignore */ }
+        }
+      } else if (opMatch[2] === "UserByRestId") {
+        if (featuresParam) {
+          try { state.userByRestIdFeatures = JSON.parse(featuresParam); } catch (e) { /* ignore */ }
+        }
+        if (togglesParam) {
+          try { state.userByRestIdFieldToggles = JSON.parse(togglesParam); } catch (e) { /* ignore */ }
         }
       }
     }
@@ -126,6 +138,13 @@ browser.runtime.onMessage.addListener((message) => {
         }
         if (Array.isArray(op.fieldToggles) && op.fieldToggles.length && !state.followersFieldToggleNames) {
           state.followersFieldToggleNames = op.fieldToggles;
+        }
+      } else if (opName === "UserByRestId") {
+        if (Array.isArray(op.features) && op.features.length && !state.userByRestIdFeatureNames) {
+          state.userByRestIdFeatureNames = op.features;
+        }
+        if (Array.isArray(op.fieldToggles) && op.fieldToggles.length && !state.userByRestIdFieldToggleNames) {
+          state.userByRestIdFieldToggleNames = op.fieldToggles;
         }
       }
     }
@@ -389,6 +408,42 @@ function resolveFollowersFieldToggles() {
   return resolveFollowingFieldToggles();
 }
 
+// UserByRestId carries its own feature set; fall back to Following's contract
+// only if we've never seen the real one.
+function resolveUserByRestIdFeatures() {
+  if (state.userByRestIdFeatures) return state.userByRestIdFeatures;
+  if (state.userByRestIdFeatureNames && state.userByRestIdFeatureNames.length) {
+    return namesToObject(state.userByRestIdFeatureNames, true);
+  }
+  return resolveFollowingFeatures();
+}
+
+function resolveUserByRestIdFieldToggles() {
+  if (state.userByRestIdFieldToggles) return state.userByRestIdFieldToggles;
+  if (state.userByRestIdFieldToggleNames && state.userByRestIdFieldToggleNames.length) {
+    return namesToObject(state.userByRestIdFieldToggleNames, false);
+  }
+  return resolveFollowingFieldToggles();
+}
+
+// Best-effort fetch of the follower/following totals (relationship_counts) via a
+// single UserByRestId call. Returns { followers, following } or null on failure.
+async function fetchFollowerCounts() {
+  if (!state.queryIds.UserByRestId || !state.userId) return null;
+  try {
+    return await fetchFollowerTotal(
+      state.queryIds.UserByRestId,
+      state.userId,
+      resolveUserByRestIdFeatures(),
+      resolveUserByRestIdFieldToggles(),
+      { ...state.tokens }
+    );
+  } catch (e) {
+    console.warn("X Unfollow: follower-total lookup failed", e && e.message);
+    return null;
+  }
+}
+
 // Extract { queryId, features, fieldToggles } for a GraphQL operation from a
 // bundle. Mirrors the extractor in content.js (background page has no DOM access
 // to share it). X registers each operation as:
@@ -488,29 +543,16 @@ browser.runtime.onConnect.addListener((port) => {
 
           state.scanStatus = "scanning";
 
-          // If a one-shot Followers discovery is still in flight, wait for it so
-          // the very first scan can include the follower count instead of "—".
-          if (!state.queryIds.Followers && state.followersDiscovery) {
-            try {
-              await state.followersDiscovery;
-            } catch (e) {
-              /* best-effort */
-            }
-          }
-
           try {
+            // Fetch the follower/following totals in parallel with the scan —
+            // it's a single cheap call and must never block or fail the scan.
+            const countsPromise = fetchFollowerCounts();
+
             const result = await runScan({
               queryId: state.queryIds.Following,
               userId: state.userId,
               features: resolveFollowingFeatures(),
               fieldToggles: resolveFollowingFieldToggles(),
-              followers: state.queryIds.Followers
-                ? {
-                    queryId: state.queryIds.Followers,
-                    features: resolveFollowersFeatures(),
-                    fieldToggles: resolveFollowersFieldToggles(),
-                  }
-                : null,
               tokens: { ...state.tokens },
               onProgress: (progress) => {
                 if (state.dashboardPort) {
@@ -519,6 +561,11 @@ browser.runtime.onConnect.addListener((port) => {
               },
               isCancelled: () => state.scanStatus === "cancelled",
             });
+
+            const counts = await countsPromise;
+            result.followersCount = counts && typeof counts.followers === "number" ? counts.followers : null;
+            result.followersComplete = result.followersCount !== null;
+
             state.scanStatus = "idle";
             state.lastScanUsers = [...result.nonFollowers, ...result.unknowns];
             return result;
