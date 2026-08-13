@@ -1,19 +1,19 @@
 {
   "manifest_version": 2,
   "name": "X Unfollow",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "Identify and unfollow non-followers on X",
-
   "browser_specific_settings": {
     "gecko": {
       "id": "x-unfollow@prodigeris",
       "strict_min_version": "142.0",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": [
+          "none"
+        ]
       }
     }
   },
-
   "permissions": [
     "webRequest",
     "storage",
@@ -22,12 +22,16 @@
     "*://*.x.com/*",
     "*://*.twitter.com/*"
   ],
-
   "background": {
-    "scripts": ["lib/storage.js", "lib/api.js", "lib/scanner.js", "lib/unfollower.js", "background.js"],
+    "scripts": [
+      "lib/storage.js",
+      "lib/api.js",
+      "lib/scanner.js",
+      "lib/unfollower.js",
+      "background.js"
+    ],
     "persistent": true
   },
-
   "browser_action": {
     "default_icon": {
       "48": "icons/icon-48.png",
@@ -35,17 +39,19 @@
     },
     "default_title": "X Unfollow"
   },
-
   "content_security_policy": "script-src 'self'; object-src 'self'; img-src 'self' data: https://pbs.twimg.com https://abs.twimg.com;",
-
   "content_scripts": [
     {
-      "matches": ["*://*.x.com/*", "*://*.twitter.com/*"],
-      "js": ["content.js"],
+      "matches": [
+        "*://*.x.com/*",
+        "*://*.twitter.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
-
   "icons": {
     "48": "icons/icon-48.png",
     "96": "icons/icon-96.png"

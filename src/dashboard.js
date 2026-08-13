@@ -219,17 +219,9 @@ function handleScanProgress(data) {
   const barEl = document.getElementById("scan-progress-bar");
   const textEl = document.getElementById("scan-progress-text");
 
-  const onFollowers = data.phase === "followers";
-  if (statusEl) statusEl.textContent = `Scanning ${onFollowers ? "followers" : "following"} list \u2014 page ${data.page}...`;
-  if (textEl) {
-    textEl.textContent = `${data.followingCollected || 0} following \u00b7 ${data.followersCollected || 0} followers retrieved`;
-  }
-  if (barEl) {
-    // Following fills the first half of the bar, followers the second half.
-    const base = onFollowers ? 50 : 0;
-    const cap = onFollowers ? 95 : 45;
-    barEl.style.width = `${Math.min(cap, base + data.page * 5)}%`;
-  }
+  if (statusEl) statusEl.textContent = `Scanning following list \u2014 page ${data.page}...`;
+  if (textEl) textEl.textContent = `${data.followingCollected || 0} following scanned`;
+  if (barEl) barEl.style.width = `${Math.min(90, (data.page || 0) * 5)}%`;
 }
 
 function cancelScan() {
