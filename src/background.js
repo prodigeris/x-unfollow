@@ -27,6 +27,8 @@ const state = {
   followersFieldToggles: null,
   followersFeatureNames: null,
   followersFieldToggleNames: null,
+  followersBundleFetchTried: false, // one-shot guard for the heavy Followers bundle lookup
+  followersDiscovery: null, // in-flight Followers discovery promise, so a scan can await it
   userId: null,
   scanStatus: "idle", // idle | scanning | unfollowing | cancelled
   lastScanUsers: [],
@@ -181,13 +183,31 @@ async function autoBootstrap() {
     state.features = getDefaultFeatures();
   }
 
-  // If we already have queryId from JS bundle interception, we're good
-  if (state.queryIds.Following) {
+  // Discover any operation contract we're still missing. Following is required;
+  // Followers is best-effort (it powers the follower count and unknown resolution).
+  if (state.queryIds.Following && state.queryIds.Followers) {
     return true;
   }
 
-  // Fallback: try fetching X's main page HTML to find JS bundle URLs
-  // and then fetch those bundles to extract queryIds
+  if (!state.queryIds.Following) {
+    // Following is required — keep trying to discover it on each readiness check.
+    await discoverOperationsFromBundles();
+  } else if (!state.queryIds.Followers && !state.followersBundleFetchTried) {
+    // Following is set but Followers isn't (e.g. its code-split chunk wasn't
+    // loaded on the page content.js saw). The bundle fetch is heavy, so run it
+    // just once and don't block readiness on it — content.js and webRequest also
+    // fill Followers in passively once the user touches a followers page.
+    state.followersBundleFetchTried = true;
+    state.followersDiscovery = discoverOperationsFromBundles();
+  }
+
+  return !!(state.queryIds.Following && state.features);
+}
+
+// Fetch X's home HTML, find its JS bundle URLs, and extract the Following /
+// Followers operation contracts (queryId + feature/fieldToggle names) from any
+// bundle that still needs discovering.
+async function discoverOperationsFromBundles() {
   try {
     const pageResp = await fetch("https://x.com/home", {
       credentials: "include",
@@ -251,8 +271,6 @@ async function autoBootstrap() {
   } catch (e) {
     console.warn("X Unfollow: auto-bootstrap fetch failed", e);
   }
-
-  return !!(state.queryIds.Following && state.features);
 }
 
 // Last-resort backstop: the feature switches X's `Following` operation required
@@ -469,6 +487,17 @@ browser.runtime.onConnect.addListener((port) => {
           }
 
           state.scanStatus = "scanning";
+
+          // If a one-shot Followers discovery is still in flight, wait for it so
+          // the very first scan can include the follower count instead of "—".
+          if (!state.queryIds.Followers && state.followersDiscovery) {
+            try {
+              await state.followersDiscovery;
+            } catch (e) {
+              /* best-effort */
+            }
+          }
+
           try {
             const result = await runScan({
               queryId: state.queryIds.Following,
